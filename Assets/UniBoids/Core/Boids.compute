@@ -1,0 +1,184 @@
+﻿#pragma kernel ForceCS
+#pragma kernel IntegrateCS
+
+// Boidデータ構造体
+struct BoidData {
+	float3 velocity;
+	float3 position;
+};
+
+#define NUM_THREAD_IN_GROUP (256)
+
+// Boidデータバッファ(読取専用/読み書き用)
+StructuredBuffer<BoidData> rBoidDataBuffer;
+RWStructuredBuffer<BoidData> rwBoidDataBuffer;
+
+// Boidの操舵力バッファ(読取専用/読み書き用)
+StructuredBuffer<float3> rBoidForceBuffer;
+RWStructuredBuffer<float3> rwBoidForceBuffer;
+
+// 最大boidオブジェクト数
+uint numMaxBoidObjects;
+
+// 前フレームからの経過時間
+float deltaTime;
+
+// 分離、整列、結合を行うオブジェクトとの距離
+float sepRadius;
+float aliRadius;
+float cohRadius;
+
+// 分離、整列、結合のそれぞれの重み
+float sepWeight;
+float aliWeight;
+float cohWeight;
+
+float maxSpeed;			// 速度の最大値
+float maxSteerForce;	// 操舵力の最大値
+
+// 壁関連
+float4 wallCenter;		// 壁の中心座標
+float4 wallSize;		// 壁の中心からの距離
+float avoidWallWeight;	// 壁を避ける重み
+
+// 計算用のシェアードメモリ
+groupshared BoidData sharedBoidDatas[NUM_THREAD_IN_GROUP];
+
+// ベクトルの大きさを最大値で制限する
+float3 Limit(float3 vec, float max) {
+	float length = sqrt(dot(vec, vec));	// 大きさ
+	return (length > max && length > 0) ? vec.xyz * (max / length) : vec.xyz; 
+}
+
+// 壁に当たった時に逆向きの力を返す
+float3 AvoidWall(float3 position) {
+	float3 wc = wallCenter.xyz;
+	float3 ws = wallSize.xyz;
+	float3 acc = float3(0, 0, 0);
+	// x
+	acc.x = (position.x < wc.x - ws.x * 0.5) ? acc.x + 1.0 : acc.x;
+ 	acc.x = (position.x > wc.x + ws.x * 0.5) ? acc.x - 1.0 : acc.x;
+
+	// y
+	acc.y = (position.y < wc.y - ws.y * 0.5) ? acc.y + 1.0 : acc.y;
+	acc.y = (position.y > wc.y + ws.y * 0.5) ? acc.y - 1.0 : acc.y;
+
+	// z
+	acc.z = (position.z < wc.z - ws.z * 0.5) ? acc.z + 1.0 : acc.z;
+	acc.z = (position.z > wc.z + ws.z * 0.5) ? acc.z - 1.0 : acc.z;
+
+	return acc;
+}
+
+// 操舵力の計算用カーネル関数
+[numthreads(NUM_THREAD_IN_GROUP, 1, 1)]
+void ForceCS(
+	uint3 dtid	: SV_DispatchThreadID,	// スレッド全体で固有のID
+	uint3 gid	: SV_GroupID,			// グループID
+	uint3 gtid	: SV_GroupThreadID,		// グループ内のスレッドID
+	uint tindex	: SV_GroupIndex			// SV_GroupThreadIDを一次元にしたもの(0~255)
+) {
+	const unsigned int pID = dtid.x;
+	BoidData pBoidData = rBoidDataBuffer[pID];
+
+	float3 pPosition = pBoidData.position;
+	float3 pVelocity = pBoidData.velocity;
+
+	float3 force = float3(0, 0, 0);
+
+	// 分離、整列、結合のそれぞれの値
+	float3 sepPosSum = float3(0, 0, 0);
+	int sepCount = 0;
+	float3 aliVelSum = float3(0, 0, 0);
+	int aliCount = 0;
+	float3 cohPosSum = float3(0, 0, 0);
+	int cohCount = 0;
+
+	[loop]
+	for(uint i = 0; i < numMaxBoidObjects; i += NUM_THREAD_IN_GROUP) {
+
+		// 高速に計算するためにシェアードメモリに一旦格納
+		sharedBoidDatas[tindex] = rBoidDataBuffer[i + tindex];
+
+		GroupMemoryBarrierWithGroupSync();
+
+		for(int j = 0; j < NUM_THREAD_IN_GROUP; ++j) {
+			BoidData qBoidData = sharedBoidDatas[j];
+
+			float3 qPosition = qBoidData.position;
+			float3 qVelocity = qBoidData.velocity;
+
+			float3 diff = pPosition - qPosition;
+			float dist = sqrt(dot(diff, diff));
+
+			// 分離、整列、結合
+			if(0.0 < dist && dist <= sepRadius) {
+				float3 repulse = normalize(diff);
+				repulse /= dist;
+				sepPosSum += repulse;
+				sepCount++;
+			}
+			if(0.0 < dist && dist <= aliRadius) {
+				aliVelSum += qVelocity;
+				aliCount++;
+			}
+			if(0.0 < dist && dist <= cohRadius) {
+				cohPosSum += qPosition;
+				cohCount++;
+			}
+		}
+
+		GroupMemoryBarrierWithGroupSync();
+	}
+
+	// 分離、整列、結合の操舵力
+	float3 sepSteer = float3(0, 0, 0);
+	if(sepCount > 0) {
+		sepSteer = sepPosSum / (float)sepCount;
+		sepSteer = normalize(sepSteer) * maxSpeed;
+		sepSteer = sepSteer - pVelocity;
+		sepSteer = Limit(sepSteer, maxSteerForce);
+	}
+	float3 aliSteer = float3(0, 0, 0);
+	if(aliCount > 0) {
+		aliSteer = aliVelSum / (float)aliCount;
+		aliSteer = normalize(aliSteer) * maxSpeed;
+		aliSteer = aliSteer - pVelocity;
+		aliSteer = Limit(aliSteer, maxSteerForce);
+	}
+	float3 cohSteer = float3(0, 0, 0);
+	if(cohCount > 0) {
+		cohPosSum = cohPosSum / (float)cohCount;
+		cohSteer = cohPosSum - pPosition;
+		cohSteer = normalize(cohSteer) * maxSpeed;
+		cohSteer = cohSteer - pVelocity;
+		cohSteer = Limit(cohSteer, maxSteerForce);
+	}
+
+	force += sepSteer * sepWeight;
+	force += aliSteer * aliWeight;
+	force += cohSteer * cohWeight;
+
+	rwBoidForceBuffer[pID] = force;
+}
+
+// 速度、位置計算用カーネル関数
+[numthreads(NUM_THREAD_IN_GROUP, 1, 1)]
+void IntegrateCS(
+	uint3 dtid : SV_DispatchThreadID
+) {
+	const unsigned int pID = dtid.x;
+
+	BoidData b = rwBoidDataBuffer[pID];			// 書き込み用のBoidデータを取得する
+	float3 force = rBoidForceBuffer[pID];		// 読み込み用の操舵力を取得する
+
+	// 壁に近づいている場合は反発する力を与える
+	force += AvoidWall(b.position) * avoidWallWeight;
+
+	b.velocity += force * deltaTime;			// 操舵力を速度に適用する
+	b.velocity = Limit(b.velocity, maxSpeed);	// 速度を制限する
+
+	b.position += b.velocity * deltaTime;		// 位置を更新する
+
+	rwBoidDataBuffer[pID] = b;					// 計算結果を書き込む
+}

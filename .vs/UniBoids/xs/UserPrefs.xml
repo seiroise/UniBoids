@@ -1,0 +1,14 @@
+﻿<Properties StartupConfiguration="{EF8369C1-3763-992A-33EB-7E7CF50B68F1}|">
+  <MonoDevelop.Ide.Workbench ActiveDocument="Assets/UniBoids/Core/Boids.compute">
+    <Files>
+      <File FileName="Assets/UniBoids/Core/Boids.compute" Line="19" Column="1" />
+    </Files>
+  </MonoDevelop.Ide.Workbench>
+  <MonoDevelop.Ide.Workspace ActiveConfiguration="Debug" />
+  <MonoDevelop.Ide.ItemProperties.UniBoids PreferredExecutionTarget="Unity.Editor" />
+  <MonoDevelop.Ide.DebuggingService.Breakpoints>
+    <BreakpointStore />
+  </MonoDevelop.Ide.DebuggingService.Breakpoints>
+  <MonoDevelop.Ide.DebuggingService.PinnedWatches />
+  <MultiItemStartupConfigurations />
+</Properties>
